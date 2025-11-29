@@ -1,58 +1,143 @@
+# aws-hevy-interval-webhook-sync
+(*README AI GENERATED*)
 
-# Welcome to your CDK Python project!
+Synchronize your Hevy workouts to Intervals.icu automatically.
 
-This is a blank project for CDK development with Python.
+This project provides:
+- An AWS Lambda + API Gateway endpoint to receive Hevy webhooks and seamlessly sync future workouts to Intervals.icu.
+- A local backfill utility to sync your previous Hevy workouts to Intervals.icu.
 
-The `cdk.json` file tells the CDK Toolkit how to execute your app.
+Works on the AWS Free Tier.
 
-This project is set up like a standard Python project.  The initialization
-process also creates a virtualenv within this project, stored under the `.venv`
-directory.  To create the virtualenv it assumes that there is a `python3`
-(or `python` for Windows) executable in your path with access to the `venv`
-package. If for any reason the automatic creation of the virtualenv fails,
-you can create the virtualenv manually.
+## General information
 
-To manually create a virtualenv on MacOS and Linux:
+- Incoming webhooks from Hevy are authenticated using the `Authorization` header. Set it to your Hevy API key.
+- The Lambda validates the header, fetches the workout from Hevy, and posts an activity to Intervals.icu.
+- The local backfill utility can page through your Hevy history and upload activities to Intervals.icu.
+
+Core code lives under `lambda/`:
+- `lambda/hevy_wh.py` — webhook handler that processes a single workout (`POST /hevy_wh`).
+- `lambda/utils.py` — API clients and helpers, including `local_sync_all()` to backfill workouts.
+
+The CDK stack (`aws_hevy_interval_sync/aws_hevy_interval_sync_stack.py`) deploys:
+- A Python Lambda function.
+- An API Gateway REST API with `POST /hevy_wh` to trigger the Lambda.
+
+## Prerequisites
+
+- Python 3.11+
+- Node.js 18+ and AWS CDK v2 (installed globally: `npm i -g aws-cdk`)
+- An AWS account with credentials configured (e.g., via `aws configure`)
+
+## Environment variables
+
+Create a `.env` file (use `.env.example` as a template) with the following keys:
+
+- `HEVY_API_KEY` — Your Hevy API key. Also used as the webhook `Authorization` secret.
+- `ICU_ATHLETE_ID` — Your Intervals.icu athlete ID (a number).
+- `ICU_API_KEY` — Your Intervals.icu API key.
+
+Example:
 
 ```
-$ python3 -m venv .venv
+HEVY_API_KEY=hevy_api_key_here
+ICU_ATHLETE_ID=123456
+ICU_API_KEY=intervals_api_key_here
 ```
 
-After the init process completes and the virtualenv is created, you can use the following
-step to activate your virtualenv.
+These variables are used both locally and must be configured on the deployed Lambda (see below).
+
+## Setup (local)
 
 ```
-$ source .venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env  # then edit .env with your keys
 ```
 
-If you are a Windows platform, you would activate the virtualenv like this:
+## Run a local backfill (sync previous workouts)
+
+A small runner script is provided at the project root: `local_sync_all.py`. It will read your environment variables (and `.env` if present) and backfill workouts to Intervals.icu.
+
+Usage examples:
 
 ```
-% .venv\Scripts\activate.bat
+# Sync the first page only (default page_size=10)
+python local_sync_all.py
+
+# Sync up to 5 pages, with a page size of 10
+python local_sync_all.py --max-page 5 --page-size 10
 ```
 
-Once the virtualenv is activated, you can install the required dependencies.
+Notes:
+- Hevy’s API limits page size to 10.
+- The script prints progress as activities are posted.
+
+## Deploy the webhook to AWS (Free Tier)
+
+1) Bootstrap CDK (first time per account/region):
 
 ```
-$ pip install -r requirements.txt
+cdk bootstrap
 ```
 
-At this point you can now synthesize the CloudFormation template for this code.
+2) Deploy the stack:
 
 ```
-$ cdk synth
+cdk deploy
 ```
 
-To add additional dependencies, for example other CDK libraries, just add
-them to your `setup.py` file and rerun the `pip install -r requirements.txt`
-command.
+3) Set Lambda environment variables:
 
-## Useful commands
+After deployment, locate the Lambda function named in the stack output `HevyWebhookHandlerLambdaFname` (or in the AWS Console under Lambda).
 
- * `cdk ls`          list all stacks in the app
- * `cdk synth`       emits the synthesized CloudFormation template
- * `cdk deploy`      deploy this stack to your default AWS account/region
- * `cdk diff`        compare deployed stack with current state
- * `cdk docs`        open CDK documentation
+Set the following environment variables on that function:
+- `HEVY_API_KEY`
+- `ICU_ATHLETE_ID`
+- `ICU_API_KEY`
 
-Enjoy!
+You can do this in the AWS Console (Lambda > Configuration > Environment variables) or via the AWS CLI:
+
+```
+aws lambda update-function-configuration \
+  --function-name <YourLambdaName> \
+  --environment "Variables={HEVY_API_KEY=...,ICU_ATHLETE_ID=...,ICU_API_KEY=}"
+```
+
+4) Find your webhook URL:
+
+The stack creates an API Gateway with a `POST /hevy_wh` resource. The invoke URL typically looks like:
+
+```
+https://<api-id>.execute-api.<region>.amazonaws.com/prod/hevy_wh
+```
+
+You can find the exact URL in API Gateway (Stages > prod), or by running `cdk synth` and inspecting outputs, or via the AWS Console.
+
+5) Configure Hevy webhook:
+
+- Set the webhook URL to the API Gateway endpoint above.
+- Set the `Authorization` header to your `HEVY_API_KEY`.
+
+6) Test the webhook manually (optional):
+
+```
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -H "Authorization: $HEVY_API_KEY" \
+  -d '{
+        "id": "test-event-id",
+        "payload": { "workoutId": "<hevy-workout-id>" }
+      }' \
+  https://<api-id>.execute-api.<region>.amazonaws.com/prod/hevy_wh
+```
+
+Expected response: `200` if authorized and the workout exists; otherwise `401` (unauthorized) or `400` (missing `workoutId`).
+
+## Useful CDK commands
+
+- `cdk ls` — list all stacks in the app
+- `cdk synth` — synthesize a CloudFormation template
+- `cdk deploy` — deploy the stack
+- `cdk diff` — compare deployed stack with current state
