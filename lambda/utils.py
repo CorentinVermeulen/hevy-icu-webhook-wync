@@ -41,7 +41,7 @@ class IntervalsIcuClient:
         response.raise_for_status()
         return response
 
-    def post_events(self, workouts):
+    def post_event_bulk(self, workouts):
         """Posts multiple workouts as bulk events.
         Update events with matching external_id if it already exists.
         """
@@ -70,10 +70,8 @@ class IntervalsIcuClient:
         """Posts a single workout as a manual activity."""
         endpoint = "activities/manual"
         payload = {
-            "category": "WORKOUT",
             "type": "WeightTraining",
             "source": "UPLOAD",
-            "entered": True,
             "color": "sweetSpot",
             "external_id": workout.get('id'),
             "name": "Hevy - " + workout.get('title', 'Workout'),
@@ -81,6 +79,26 @@ class IntervalsIcuClient:
             "description": _parse_exercises_to_desc(workout.get('exercises')),
             "moving_time": _get_moving_time(workout.get('start_time'), workout.get('end_time'))
         }
+
+        return self._post(endpoint, payload)
+
+    def post_activity_bulk(self, workouts):
+        endpoint = "activities/manual/bulk"
+
+        payload = [
+            {
+                "type": "WeightTraining",
+                "source": "UPLOAD",
+                "external_id": workout.get('id'),
+                "name": "Hevy - " + workout.get('title', 'Workout'),
+                "start_date_local": _convert_start_time(workout.get('start_time')),
+                "description": _parse_exercises_to_desc(workout.get('exercises')),
+                "moving_time": _get_moving_time(workout.get('start_time'), workout.get('end_time'))
+            } for workout in workouts
+        ]
+
+        if not payload:
+            return requests.Response()
 
         return self._post(endpoint, payload)
 
@@ -177,15 +195,11 @@ def local_sync_all(max_page=1, page_size=10):
 
     curr_page = 1
     page_count = 1
-    activity_count = 0
 
-    while curr_page <= page_count and curr_page <= max_page:
+    while curr_page <= page_count:
         res = hevy_client.fetch_workouts_page(page=curr_page, page_size=page_size)
-        page_count = res.get('page_count', 1)
-
-        for workout in res.get('workouts', []):
-            icu_client.post_activity(workout)
-            activity_count += 1
-            print(f"\rActivity {activity_count} synced. (page {curr_page}/{page_count})", end="")
-
+        page_count = min(res.get('page_count', 1), max_page)
+        icu_client.post_activity_bulk(res.get('workouts', []))
+        print(f"\rActivity Page {curr_page}/{page_count} synced.", end="")
         curr_page += 1
+    print("\nDone!")
